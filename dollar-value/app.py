@@ -213,8 +213,8 @@ def load_historical_data():
         return None
 
 @st.cache_data
-def load_asset_data(start_date):
-    """Load historical price data for gold and bitcoin."""
+def load_asset_data(start_date, cpi_data):
+    """Load historical price data for gold and bitcoin, adjusted for CPI."""
     try:
         # Get gold data (GLD ETF as proxy)
         gold = yf.download('GLD', start=start_date, progress=False)
@@ -230,13 +230,35 @@ def load_asset_data(start_date):
         assets = pd.merge(gold, btc, how='outer', left_index=True, right_index=True)
         
         # Forward fill missing values (for dates before Bitcoin existed)
-        assets = assets.fillna(method='ffill')
+        assets = assets.ffill()
         
-        # Normalize to 100 at start
-        for col in assets.columns:
-            assets[col] = assets[col] * (100 / assets[col].iloc[0])
+        # Resample to month-end to match USD data
+        assets = assets.resample('ME').last()
         
-        return assets
+        # Merge with CPI data to adjust for inflation
+        cpi_monthly = cpi_data.set_index('date').resample('ME').last()
+        assets = pd.merge(assets, cpi_monthly[['cpi']], 
+                         left_index=True, right_index=True, 
+                         how='left')
+        assets['cpi'] = assets['cpi'].ffill()  # Forward fill any missing CPI values
+        
+        # Calculate real values adjusted for inflation
+        base_cpi = assets['cpi'].iloc[0]
+        for col in ['gold', 'bitcoin']:
+            if col in assets.columns:
+                # Adjust for inflation: multiply by (base_cpi / current_cpi)
+                assets[col] = assets[col] * (base_cpi / assets['cpi'])
+                
+                # Normalize to 100 at start
+                first_valid = assets[col].first_valid_index()
+                if first_valid:
+                    start_value = assets[col].loc[first_valid]
+                    if start_value > 0:
+                        assets[col] = assets[col] * (100 / start_value)
+                    else:
+                        assets[col] = 100
+        
+        return assets[['gold', 'bitcoin']]
     except Exception as e:
         st.warning(f"Could not load asset data: {str(e)}")
         return None
@@ -273,11 +295,25 @@ if historical_data is not None:
         step=1
     )
 
-    # Asset comparison toggle
-    show_assets = st.sidebar.checkbox(
-        "Show Gold and Bitcoin Comparison",
-        value=True,
-        help="Compare USD purchasing power with gold and bitcoin performance"
+    # Asset comparison toggles
+    st.sidebar.header("Asset Comparison")
+    show_gold = st.sidebar.checkbox(
+        "Show Gold (GLD ETF)",
+        value=False,
+        help="Compare USD purchasing power with gold"
+    )
+    
+    show_bitcoin = st.sidebar.checkbox(
+        "Show Bitcoin",
+        value=False,
+        help="Compare USD purchasing power with bitcoin"
+    )
+
+    # Scale toggle
+    use_log_scale = st.sidebar.checkbox(
+        "Use Logarithmic Scale",
+        value=False,  # Default to linear scale
+        help="Switch between linear and logarithmic scale"
     )
 
     st.sidebar.header("Scenario Selection")
@@ -381,7 +417,7 @@ if historical_data is not None:
     projection_dates = pd.date_range(
         start=last_historical['date'],
         periods=len(values),
-        freq='M'
+        freq='ME'  # Using 'ME' (month end) instead of deprecated 'M'
     )
 
     # Add projected values
@@ -393,46 +429,59 @@ if historical_data is not None:
         line=dict(color='#1f77b4', width=2, dash='dash')
     ))
 
+    # Initialize max_value with current data
+    max_value = max(max(filtered_data['normalized_power']), max(values))
+
     # Add gold and bitcoin comparison if selected
-    if show_assets:
-        start_date = f"{START_YEAR}-01-01"
-        asset_data = load_asset_data(start_date)
+    start_date = f"{START_YEAR}-01-01"
+    asset_data = load_asset_data(start_date, historical_data)
+    
+    if asset_data is not None:
+        # Add gold trace if selected
+        if show_gold and 'gold' in asset_data.columns:
+            gold_data = asset_data['gold'].dropna()
+            if not gold_data.empty:
+                fig.add_trace(go.Scatter(
+                    x=gold_data.index,
+                    y=gold_data,
+                    mode='lines',
+                    name='Gold (GLD ETF)',
+                    line=dict(color='#ffd700', width=2)
+                ))
+                max_value = max(max_value, gold_data.max())
         
-        if asset_data is not None:
-            # Add gold trace
-            fig.add_trace(go.Scatter(
-                x=asset_data.index,
-                y=asset_data['gold'],
-                mode='lines',
-                name='Gold (GLD ETF)',
-                line=dict(color='#ffd700', width=2)
-            ))
-            
-            # Add bitcoin trace
-            fig.add_trace(go.Scatter(
-                x=asset_data.index,
-                y=asset_data['bitcoin'],
-                mode='lines',
-                name='Bitcoin',
-                line=dict(color='#f39c12', width=2)
-            ))
+        # Add bitcoin trace if selected
+        if show_bitcoin and 'bitcoin' in asset_data.columns:
+            bitcoin_data = asset_data['bitcoin'].dropna()
+            if not bitcoin_data.empty:
+                fig.add_trace(go.Scatter(
+                    x=bitcoin_data.index,
+                    y=bitcoin_data,
+                    mode='lines',
+                    name='Bitcoin',
+                    line=dict(color='#f39c12', width=2)
+                ))
+                max_value = max(max_value, bitcoin_data.max())
 
-    # Add reference line for start year baseline
-    fig.add_hline(
-        y=100, 
-        line_dash="dot", 
-        line_color="gray", 
-        opacity=0.5,
-        annotation_text=f"{START_YEAR} Baseline (100)",
-        annotation_position="bottom right"
-    )
-
-    # Customize layout
+    # Customize layout with proper y-axis range
     fig.update_layout(
         title=f'Asset Value Comparison ({START_YEAR}-Present) with {selected_scenario} USD Scenario',
         xaxis_title='Year',
-        yaxis_title=f'Relative Value ({START_YEAR} = 100)',
-        yaxis_type='log' if show_assets else 'linear',  # Use log scale when showing assets
+        yaxis_title=f'Percent of {START_YEAR} Value (Starting Value = 100%)',
+        yaxis_type='log' if use_log_scale else 'linear',
+        yaxis=dict(
+            range=[0, max_value * 1.1] if not use_log_scale else [1, np.log10(max_value) * 1.1],
+            tickformat='.1f' if not use_log_scale else '',
+            ticksuffix='%',  # Add percent symbol to tick labels
+            gridcolor='rgba(128, 128, 128, 0.2)',
+            showgrid=True,
+        ),
+        xaxis=dict(
+            gridcolor='rgba(128, 128, 128, 0.2)',
+            showgrid=True,
+        ),
+        plot_bgcolor='rgba(0,0,0,0)',
+        paper_bgcolor='rgba(0,0,0,0)',
         hovermode='x unified',
         height=600,
         showlegend=True,
@@ -440,97 +489,144 @@ if historical_data is not None:
             yanchor="top",
             y=0.99,
             xanchor="left",
-            x=0.01
+            x=0.01,
+            bgcolor='rgba(255, 255, 255, 0)'  # Fully transparent background
         )
+    )
+
+    # Add reference line for start year baseline with better positioning
+    fig.add_hline(
+        y=100, 
+        line_dash="dot", 
+        line_color="rgba(128, 128, 128, 0.5)", 
+        opacity=0.5
+    )
+    
+    # Add baseline annotation separately
+    fig.add_annotation(
+        text=f"{START_YEAR} Starting Value (100%)",
+        xref="paper",
+        yref="y",
+        x=1,
+        y=100,
+        showarrow=False,
+        yshift=10,
+        xshift=-10,
+        font=dict(size=10, color="rgba(128, 128, 128, 0.8)")
     )
 
     # Display plot
     st.plotly_chart(fig, use_container_width=True)
 
-    # Display key metrics
-    final_value = values[-1]
+    # Calculate final value and other metrics
+    final_value = values[-1]  # Get the last value from projections
     total_change = ((final_value - current_value) / current_value) * 100
     annual_change = ((final_value / current_value) ** (1/years) - 1) * 100
 
-    col1, col2, col3 = st.columns(3)
+    # Display key metrics with full text
+    st.markdown("### Key Metrics")
+    
+    # Create three columns with more space
+    col1, col2, col3 = st.columns([1, 1, 1])
 
     with col1:
         st.metric(
-            "Current Value",
-            f"{current_value:.1f}",
-            f"Relative to {START_YEAR} (100)"
+            "Current USD Purchasing Power",
+            f"{current_value:.1f}%",
+            ""  # Remove delta text from metric
         )
+        st.markdown(f"💵 A dollar buys {current_value:.1f}% of what it bought in {START_YEAR}")
+        st.markdown("*Compared to baseline value of 100%*")
 
     with col2:
+        loss_in_value = 100 - final_value
         st.metric(
-            "Projected Value in " + str(end_year),
-            f"{final_value:.1f}",
-            f"{total_change:+.1f}% total change"
+            f"Projected Purchasing Power Loss",
+            f"-{loss_in_value:.1f}%",
+            ""  # Remove delta text from metric
         )
+        st.markdown(f"📉 By {end_year}, a dollar will buy {final_value:.1f}% of what it bought in {START_YEAR}")
+        st.markdown("*Total projected decline in value*")
 
     with col3:
         st.metric(
-            "Projected Annual Change",
-            f"{annual_change:+.1f}%/year",
-            f"From {CURRENT_YEAR} to {end_year}"
+            "Annual Rate of Decline",
+            f"{annual_change:+.1f}%",
+            ""  # Remove delta text from metric
         )
+        st.markdown(f"📊 Average yearly loss from {CURRENT_YEAR} to {end_year}")
+        st.markdown("*Compound annual rate of decline*")
 
-    # Add explanatory notes
-    st.markdown("""
-    ### Understanding the Scenarios
+    # Add explanatory notes in collapsible sections
+    st.markdown("### 📊 Analysis Details")
+    
+    with st.expander("🎯 Understanding the Scenarios"):
+        st.markdown("""
+        This model simulates four potential scenarios for the US dollar's future, based on historical precedents and economic theory:
 
-    This model simulates four potential scenarios for the US dollar's future, based on historical precedents and economic theory:
+        **1. Mild Devaluation (30% probability)**
+        - Controlled weakening of the dollar
+        - Moderate inflation of 3-5%
+        - Limited market impact
+        - Recommended hedges: 20-30% foreign assets, 10-15% real assets
 
-    1. **Mild Devaluation (30% probability)**
-       - Controlled weakening of the dollar
-       - Moderate inflation of 3-5%
-       - Limited market impact
-       - Recommended hedges: 20-30% foreign assets, 10-15% real assets
+        **2. Moderate Devaluation (40% probability)**
+        - More aggressive currency intervention
+        - 6-10% yearly inflation
+        - Notable market volatility
+        - Recommended hedges: 15-20% hard assets, 20% foreign currencies
 
-    2. **Moderate Devaluation (40% probability)**
-       - More aggressive currency intervention
-       - 6-10% yearly inflation
-       - Notable market volatility
-       - Recommended hedges: 15-20% hard assets, 20% foreign currencies
+        **3. Severe Crisis (20% probability)**
+        - Sharp loss of dollar credibility
+        - 10-20% annual inflation
+        - Potential debt ceiling crisis
+        - Recommended hedges: 25%+ hard assets, 25% foreign holdings
 
-    3. **Severe Crisis (20% probability)**
-       - Sharp loss of dollar credibility
-       - 10-20% annual inflation
-       - Potential debt ceiling crisis
-       - Recommended hedges: 25%+ hard assets, 25% foreign holdings
+        **4. Hyperinflation (<10% probability)**
+        - Complete loss of confidence
+        - Inflation exceeding 20% annually
+        - Similar to post-Soviet Russian crisis
+        - Recommended hedges: 40%+ tangible assets, multiple foreign currencies
+        """)
 
-    4. **Hyperinflation (<10% probability)**
-       - Complete loss of confidence
-       - Inflation exceeding 20% annually
-       - Similar to post-Soviet Russian crisis
-       - Recommended hedges: 40%+ tangible assets, multiple foreign currencies
+    with st.expander("⚙️ Model Factors"):
+        st.markdown("""
+        The projection considers these key economic relationships:
 
-    ### Model Factors
-    The projection considers these key economic relationships:
+        - **Debt Impact**: Higher debt levels amplify inflation effects
+        - **Interest Rate Effectiveness**: Diminishes during high inflation
+        - **Growth Dynamics**: Negative growth has stronger impact in crises
+        - **Trade Effects**: Deficits reduce effectiveness of growth
+        - **Crisis Acceleration**: Problems compound faster in severe scenarios
+        """)
 
-    - **Debt Impact**: Higher debt levels amplify inflation effects
-    - **Interest Rate Effectiveness**: Diminishes during high inflation
-    - **Growth Dynamics**: Negative growth has stronger impact in crises
-    - **Trade Effects**: Deficits reduce effectiveness of growth
-    - **Crisis Acceleration**: Problems compound faster in severe scenarios
+    with st.expander("📚 Historical Context & Risk Factors"):
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.markdown("**Historical Context**")
+            st.markdown("""
+            - Model incorporates lessons from historical currency crises
+            - Particular attention to post-Soviet Russian experience
+            - Considers both gradual decline and sudden crisis scenarios
+            """)
+        
+        with col2:
+            st.markdown("**Risk Factors**")
+            st.markdown("""
+            - Political stability and policy decisions
+            - Global confidence in US institutions
+            - Debt ceiling and fiscal policy
+            - International relations and trade policy
+            - Monetary policy effectiveness
+            """)
 
-    ### Historical Context
-    - The model incorporates lessons from historical currency crises
-    - Particular attention to the post-Soviet Russian experience
-    - Considers both gradual decline and sudden crisis scenarios
-
-    ### Risk Factors
-    - Political stability and policy decisions
-    - Global confidence in US institutions
-    - Debt ceiling and fiscal policy
-    - International relations and trade policy
-    - Monetary policy effectiveness
-
-    ### Limitations
-    - Model is simplified for educational purposes
-    - Cannot predict exact timing of crises
-    - Does not capture all possible scenarios
-    - Past crises may not perfectly predict future ones
-    """)
+    with st.expander("⚠️ Model Limitations"):
+        st.markdown("""
+        - Model is simplified for educational purposes
+        - Cannot predict exact timing of crises
+        - Does not capture all possible scenarios
+        - Past crises may not perfectly predict future ones
+        """)
 else:
     st.error("Unable to load historical data. Please check the data file.") 
