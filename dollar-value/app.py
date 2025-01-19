@@ -6,6 +6,7 @@ import numpy as np
 import plotly.graph_objects as go
 from datetime import datetime
 from dotenv import load_dotenv
+from scipy import stats
 
 # Load environment variables
 load_dotenv()
@@ -16,8 +17,45 @@ FRED_URL = "https://api.stlouisfed.org/fred/series/observations"
 SERIES_ID = "CPIAUCSL"  # Consumer Price Index for All Urban Consumers
 OUTPUT_FILE = "us_dollar_value.csv"
 
+def calculate_recent_trend(historical_data, years_back=5):
+    """Calculate trend parameters from recent historical data using CAGR."""
+    # Get recent data
+    recent_data = historical_data.copy()
+    end_date = recent_data['date'].max()
+    start_date = end_date - pd.DateOffset(years=years_back)
+    mask = (recent_data['date'] >= start_date)
+    recent_data = recent_data[mask]
+    
+    # Calculate CAGR of purchasing power
+    start_pp = recent_data.iloc[0]['purchasing_power']
+    end_pp = recent_data.iloc[-1]['purchasing_power']
+    cagr = (end_pp / start_pp) ** (1/years_back) - 1
+    
+    # Calculate average real GDP growth
+    recent_data['gdp_proxy'] = recent_data['purchasing_power'].pct_change(12)
+    avg_gdp = recent_data['gdp_proxy'].mean() * 100
+    
+    # Calculate average inflation (year-over-year)
+    recent_data['cpi_yoy'] = recent_data['cpi'].pct_change(12) * 100
+    avg_inflation = recent_data['cpi_yoy'].mean()
+    
+    return {
+        "inflation": round(avg_inflation, 1),
+        "interest": 5.25,  # Current Federal Funds Rate
+        "gdp": round(max(avg_gdp, 0.5), 1),  # Floor of 0.5% growth
+        "debt": 120.0,    # Current approximate debt/GDP
+        "trade": 3.0,     # Current approximate trade deficit
+        "description": f"""Extrapolates current economic conditions based on the last {years_back} years:
+        - Historical CAGR: {cagr*100:.1f}% per year
+        - Average inflation: {avg_inflation:.1f}%
+        - Estimated GDP growth: {max(avg_gdp, 0.5):.1f}%
+        - Current Federal Funds Rate: 5.25%
+        - Uses actual trend from {start_date.year} to {end_date.year}"""
+    }
+
 # Scenario presets
 SCENARIOS = {
+    "Current Trend": {},  # Will be populated with actual data
     "Custom": {
         "inflation": 3.0,
         "interest": 5.25,
@@ -26,34 +64,53 @@ SCENARIOS = {
         "trade": 3.0,
         "description": "Custom scenario with user-defined parameters"
     },
-    "Russian Crisis (1998)": {
-        "inflation": 84.4,  # Peak inflation during the crisis
-        "interest": 150.0,  # Emergency rate hike
-        "gdp": -5.3,      # GDP contraction
-        "debt": 130.0,    # High debt levels
-        "trade": 8.0,     # Trade imbalances
-        "description": """Simulates conditions similar to the 1998 Russian financial crisis:
-        - Hyperinflation following currency collapse
-        - Emergency interest rate hikes
-        - Severe economic contraction
-        - High government debt
-        - Trade imbalances"""
-    },
-    "Moderate Decline": {
-        "inflation": 7.0,
-        "interest": 3.0,
-        "gdp": 1.0,
-        "debt": 150.0,
-        "trade": 5.0,
-        "description": "Gradual economic deterioration with above-target inflation"
-    },
-    "Stagflation": {
-        "inflation": 12.0,
-        "interest": 8.0,
-        "gdp": -1.0,
-        "debt": 140.0,
+    "Mild Devaluation": {
+        "inflation": 4.0,
+        "interest": 4.5,
+        "gdp": 1.5,
+        "debt": 125.0,
         "trade": 4.0,
-        "description": "High inflation combined with economic stagnation, similar to the 1970s"
+        "description": """Scenario 1 (30% probability):
+        - Moderate policy changes weaken dollar on purpose
+        - Fed allows higher inflation for economic growth
+        - 3-5% annual dollar value decline
+        - Stock market volatility but no crash"""
+    },
+    "Moderate Devaluation": {
+        "inflation": 8.0,
+        "interest": 6.0,
+        "gdp": 0.5,
+        "debt": 135.0,
+        "trade": 5.0,
+        "description": """Scenario 2 (40% probability):
+        - 6-10% yearly inflation
+        - Heavy government intervention
+        - Aggressive export-focused policy
+        - Large government spending"""
+    },
+    "Severe Crisis": {
+        "inflation": 15.0,
+        "interest": 12.0,
+        "gdp": -2.0,
+        "debt": 150.0,
+        "trade": 7.0,
+        "description": """Scenario 3 (20% probability):
+        - 10-20% inflation per year
+        - Possible debt-ceiling scares
+        - Sharp loss of dollar credibility
+        - Global investors dump Treasuries"""
+    },
+    "Hyperinflation": {
+        "inflation": 50.0,
+        "interest": 45.0,
+        "gdp": -5.0,
+        "debt": 180.0,
+        "trade": 10.0,
+        "description": """Scenario 4 (<10% probability):
+        - Inflation beyond 20% per year
+        - Complete loss of confidence
+        - Emergency measures likely
+        - Similar to post-Soviet Russian crisis"""
     }
 }
 
@@ -64,50 +121,65 @@ def calculate_dollar_value(params, years, start_value, scenario_name="Custom"):
     
     # Monthly timesteps
     months = years * 12
-    timeline = np.array([START_YEAR + i/12 for i in range(months)])
     
-    # Enhanced factor weights based on scenario
-    if scenario_name == "Russian Crisis (1998)":
-        # More dramatic weights for crisis scenario
-        inflation_impact = -1.2  # Stronger inflation impact
-        interest_rate_impact = 0.3  # Reduced effectiveness of interest rates
-        gdp_impact = 0.4  # Stronger GDP impact
-        debt_impact = -0.4  # Stronger debt impact
-        trade_impact = -0.4  # Stronger trade impact
-        
-        # Add crisis acceleration factor
-        crisis_factor = 1.5  # Accelerates the decline
-    else:
-        # Standard weights for other scenarios
-        inflation_impact = -0.8
-        interest_rate_impact = 0.4
-        gdp_impact = 0.3
-        debt_impact = -0.2
-        trade_impact = -0.3
-        crisis_factor = 1.0
-    
-    # Calculate monthly effects with non-linear relationships
+    # Calculate monthly compound rates
     monthly_inflation = (1 + params['inflation'] / 100) ** (1/12) - 1
     monthly_interest = (1 + params['interest'] / 100) ** (1/12) - 1
     monthly_gdp = (1 + params['gdp'] / 100) ** (1/12) - 1
     
-    # Enhanced combined monthly effect with non-linear relationships
-    monthly_effect = (
-        (monthly_inflation * inflation_impact * (1 + abs(monthly_inflation))) +  # Non-linear inflation impact
-        (monthly_interest * interest_rate_impact * (1 - monthly_inflation)) +    # Interest rate effectiveness decreases with high inflation
-        (monthly_gdp * gdp_impact) +
-        (params['debt'] / 100) * debt_impact * (1 + params['inflation'] / 200) / 12 +  # Debt impact increases with inflation
-        (params['trade'] / 100) * trade_impact / 12
-    ) * crisis_factor
+    # Base inflation impact (Fisher equation: real rate = nominal rate - inflation)
+    real_rate = monthly_interest - monthly_inflation
     
-    # Calculate cumulative effect with potential for accelerated decline
-    values = base_value * (1 + monthly_effect) ** np.array(range(months))
+    # Crisis dynamics based on scenario
+    if scenario_name == "Hyperinflation":
+        # Hyperinflation dynamics:
+        inflation_multiplier = 2.0 * (1 + params['debt'] / 150)  # Severe debt impact
+        growth_impact = 0.8  # Strong negative feedback
+        volatility_base = 0.04  # High volatility
+        crisis_acceleration = np.exp(np.linspace(0, 0.5, months))  # Exponential crisis deepening
+    elif scenario_name == "Severe Crisis":
+        inflation_multiplier = 1.5 * (1 + params['debt'] / 175)
+        growth_impact = 0.6
+        volatility_base = 0.03
+        crisis_acceleration = np.linspace(1, 1.3, months)
+    elif scenario_name == "Moderate Devaluation":
+        inflation_multiplier = 1.2 * (1 + params['debt'] / 200)
+        growth_impact = 0.4
+        volatility_base = 0.02
+        crisis_acceleration = np.linspace(1, 1.1, months)
+    else:
+        inflation_multiplier = 1.0 + params['debt'] / 400
+        growth_impact = 0.3
+        volatility_base = 0.01
+        crisis_acceleration = np.ones(months)
     
-    # Add volatility for crisis scenario
-    if scenario_name == "Russian Crisis (1998)":
-        volatility = np.random.normal(0, 0.02, months)  # 2% monthly volatility
-        values = values * (1 + volatility)
+    # Calculate month-by-month values using compound effects
+    values = np.zeros(months)
+    values[0] = base_value
     
+    for i in range(1, months):
+        # Real economic growth effect (GDP adjusted for trade deficit)
+        growth_effect = (1 + monthly_gdp * (1 - params['trade'] / 100)) ** growth_impact
+        
+        # Inflation effect (adjusted for debt burden)
+        inflation_effect = (1 + monthly_inflation * inflation_multiplier)
+        
+        # Real interest rate effect (diminishing in high inflation)
+        interest_effect = (1 + real_rate * max(0, 1 - monthly_inflation * 5))
+        
+        # Debt burden effect (increases with inflation)
+        debt_effect = 1 - (params['debt'] / 1000) * monthly_inflation
+        
+        # Combined monthly effect with crisis acceleration
+        monthly_change = (growth_effect * interest_effect * debt_effect / inflation_effect) ** crisis_acceleration[i]
+        
+        values[i] = values[i-1] * monthly_change
+    
+    # Add increasing volatility based on scenario severity
+    volatility = np.random.normal(0, volatility_base * crisis_acceleration, months)
+    values = values * (1 + volatility)
+    
+    timeline = np.array([START_YEAR + i/12 for i in range(months)])
     return timeline, values
 
 # Set page config
@@ -128,6 +200,8 @@ Values are normalized to 100 at the selected start year, showing the relative ch
 try:
     historical_data = pd.read_csv("us_dollar_value.csv")
     historical_data['date'] = pd.to_datetime(historical_data['date'])
+    # Calculate Current Trend scenario from recent data
+    SCENARIOS["Current Trend"] = calculate_recent_trend(historical_data)
 except Exception as e:
     st.error("Please make sure the historical data file 'us_dollar_value.csv' is available.")
     historical_data = None
@@ -155,7 +229,7 @@ if historical_data is not None:
         "Project Until Year",
         min_value=CURRENT_YEAR,
         max_value=CURRENT_YEAR + 30,
-        value=CURRENT_YEAR + 5,
+        value=CURRENT_YEAR + 10,
         step=1
     )
 
@@ -331,32 +405,60 @@ if historical_data is not None:
 
     # Add explanatory notes
     st.markdown("""
-    ### How to Interpret the Results
+    ### Understanding the Scenarios
 
-    - **Historical Data** (solid green line) shows the actual purchasing power of the US dollar based on CPI data
-    - **Projected Values** (dashed blue line) show simulated future scenarios based on the selected scenario and parameters
-    - Values are normalized to 100 at the selected start year
-    - A value of 50 means half the purchasing power compared to the start year
+    This model simulates four potential scenarios for the US dollar's future, based on historical precedents and economic theory:
+
+    1. **Mild Devaluation (30% probability)**
+       - Controlled weakening of the dollar
+       - Moderate inflation of 3-5%
+       - Limited market impact
+       - Recommended hedges: 20-30% foreign assets, 10-15% real assets
+
+    2. **Moderate Devaluation (40% probability)**
+       - More aggressive currency intervention
+       - 6-10% yearly inflation
+       - Notable market volatility
+       - Recommended hedges: 15-20% hard assets, 20% foreign currencies
+
+    3. **Severe Crisis (20% probability)**
+       - Sharp loss of dollar credibility
+       - 10-20% annual inflation
+       - Potential debt ceiling crisis
+       - Recommended hedges: 25%+ hard assets, 25% foreign holdings
+
+    4. **Hyperinflation (<10% probability)**
+       - Complete loss of confidence
+       - Inflation exceeding 20% annually
+       - Similar to post-Soviet Russian crisis
+       - Recommended hedges: 40%+ tangible assets, multiple foreign currencies
 
     ### Model Factors
-    The projection considers these key economic factors with varying weights based on the scenario:
-    - Inflation rate (stronger negative impact in crisis scenarios)
-    - Interest rates (effectiveness decreases during high inflation)
-    - GDP growth (increased impact during crises)
-    - Debt to GDP ratio (impact increases with inflation)
-    - Trade deficit (higher impact in crisis scenarios)
+    The projection considers these key economic relationships:
 
-    ### Scenario Details
-    - **Custom**: User-defined parameters for flexible analysis
-    - **Russian Crisis**: Simulates severe economic conditions similar to the 1998 Russian financial crisis
-    - **Moderate Decline**: Gradual deterioration with above-target inflation
-    - **Stagflation**: High inflation with economic stagnation
+    - **Debt Impact**: Higher debt levels amplify inflation effects
+    - **Interest Rate Effectiveness**: Diminishes during high inflation
+    - **Growth Dynamics**: Negative growth has stronger impact in crises
+    - **Trade Effects**: Deficits reduce effectiveness of growth
+    - **Crisis Acceleration**: Problems compound faster in severe scenarios
+
+    ### Historical Context
+    - The model incorporates lessons from historical currency crises
+    - Particular attention to the post-Soviet Russian experience
+    - Considers both gradual decline and sudden crisis scenarios
+
+    ### Risk Factors
+    - Political stability and policy decisions
+    - Global confidence in US institutions
+    - Debt ceiling and fiscal policy
+    - International relations and trade policy
+    - Monetary policy effectiveness
 
     ### Limitations
-    - This is a simplified model for educational purposes
-    - Real currency crises can be more severe and unpredictable
-    - International events, policy changes, and market sentiment are not fully captured
-    - Past performance does not guarantee future results
+    - Model is simplified for educational purposes
+    - Cannot predict exact timing of crises
+    - Does not capture all possible scenarios
+    - Past crises may not perfectly predict future ones
     """)
 else:
     st.error("Unable to load historical data. Please check the data file.") 
