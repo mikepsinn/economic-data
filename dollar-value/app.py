@@ -213,8 +213,8 @@ def load_historical_data():
         return None
 
 @st.cache_data
-def load_asset_data(start_date, cpi_data):
-    """Load historical price data for gold and bitcoin, adjusted for CPI."""
+def load_asset_data(start_date, cpi_data, adjust_for_inflation=False):
+    """Load historical price data for gold and bitcoin, with optional CPI adjustment."""
     try:
         # Get gold data (GLD ETF as proxy)
         gold = yf.download('GLD', start=start_date, progress=False)
@@ -235,21 +235,24 @@ def load_asset_data(start_date, cpi_data):
         # Resample to month-end to match USD data
         assets = assets.resample('ME').last()
         
-        # Merge with CPI data to adjust for inflation
-        cpi_monthly = cpi_data.set_index('date').resample('ME').last()
-        assets = pd.merge(assets, cpi_monthly[['cpi']], 
-                         left_index=True, right_index=True, 
-                         how='left')
-        assets['cpi'] = assets['cpi'].ffill()  # Forward fill any missing CPI values
+        if adjust_for_inflation:
+            # Merge with CPI data to adjust for inflation
+            cpi_monthly = cpi_data.set_index('date').resample('ME').last()
+            assets = pd.merge(assets, cpi_monthly[['cpi']], 
+                            left_index=True, right_index=True, 
+                            how='left')
+            assets['cpi'] = assets['cpi'].ffill()
+            
+            # Calculate real values adjusted for inflation
+            base_cpi = assets['cpi'].iloc[0]
+            for col in ['gold', 'bitcoin']:
+                if col in assets.columns:
+                    # Adjust for inflation: multiply by (base_cpi / current_cpi)
+                    assets[col] = assets[col] * (base_cpi / assets['cpi'])
         
-        # Calculate real values adjusted for inflation
-        base_cpi = assets['cpi'].iloc[0]
+        # Normalize to 100 at start for both nominal and real values
         for col in ['gold', 'bitcoin']:
             if col in assets.columns:
-                # Adjust for inflation: multiply by (base_cpi / current_cpi)
-                assets[col] = assets[col] * (base_cpi / assets['cpi'])
-                
-                # Normalize to 100 at start
                 first_valid = assets[col].first_valid_index()
                 if first_valid:
                     start_value = assets[col].loc[first_valid]
@@ -281,7 +284,7 @@ if historical_data is not None:
         "Start Year",
         min_value=max(MIN_YEAR, 2004),  # GLD ETF started in 2004
         max_value=CURRENT_YEAR-1,
-        value=2010,  # Changed default to include Bitcoin history
+        value=2024,  # Default to 2024
         step=1,
         help="Year to start the analysis (normalized to 100)"
     )
@@ -291,7 +294,7 @@ if historical_data is not None:
         "Project Until Year",
         min_value=CURRENT_YEAR,
         max_value=CURRENT_YEAR + 30,
-        value=CURRENT_YEAR + 10,
+        value=2035,  # Default to 2035
         step=1
     )
 
@@ -299,20 +302,27 @@ if historical_data is not None:
     st.sidebar.header("Asset Comparison")
     show_gold = st.sidebar.checkbox(
         "Show Gold (GLD ETF)",
-        value=False,
+        value=True,  # Default to showing gold
         help="Compare USD purchasing power with gold"
     )
     
     show_bitcoin = st.sidebar.checkbox(
         "Show Bitcoin",
-        value=False,
+        value=True,  # Default to showing bitcoin
         help="Compare USD purchasing power with bitcoin"
+    )
+
+    # Add CPI adjustment toggle
+    adjust_for_inflation = st.sidebar.checkbox(
+        "Adjust Asset Prices for Inflation",
+        value=False,
+        help="Convert asset prices to real values by adjusting for inflation"
     )
 
     # Scale toggle
     use_log_scale = st.sidebar.checkbox(
         "Use Logarithmic Scale",
-        value=False,  # Default to linear scale
+        value=False,
         help="Switch between linear and logarithmic scale"
     )
 
@@ -434,18 +444,19 @@ if historical_data is not None:
 
     # Add gold and bitcoin comparison if selected
     start_date = f"{START_YEAR}-01-01"
-    asset_data = load_asset_data(start_date, historical_data)
+    asset_data = load_asset_data(start_date, historical_data, adjust_for_inflation)
     
     if asset_data is not None:
         # Add gold trace if selected
         if show_gold and 'gold' in asset_data.columns:
             gold_data = asset_data['gold'].dropna()
             if not gold_data.empty:
+                name_suffix = " (CPI Adjusted)" if adjust_for_inflation else " (Nominal Price)"
                 fig.add_trace(go.Scatter(
                     x=gold_data.index,
                     y=gold_data,
                     mode='lines',
-                    name='Gold (GLD ETF)',
+                    name=f'Gold{name_suffix}',
                     line=dict(color='#ffd700', width=2)
                 ))
                 max_value = max(max_value, gold_data.max())
@@ -454,11 +465,12 @@ if historical_data is not None:
         if show_bitcoin and 'bitcoin' in asset_data.columns:
             bitcoin_data = asset_data['bitcoin'].dropna()
             if not bitcoin_data.empty:
+                name_suffix = " (CPI Adjusted)" if adjust_for_inflation else " (Nominal Price)"
                 fig.add_trace(go.Scatter(
                     x=bitcoin_data.index,
                     y=bitcoin_data,
                     mode='lines',
-                    name='Bitcoin',
+                    name=f'Bitcoin{name_suffix}',
                     line=dict(color='#f39c12', width=2)
                 ))
                 max_value = max(max_value, bitcoin_data.max())
