@@ -7,6 +7,7 @@ import plotly.graph_objects as go
 from datetime import datetime
 from dotenv import load_dotenv
 from scipy import stats
+import yfinance as yf
 
 # Load environment variables
 load_dotenv()
@@ -69,11 +70,11 @@ SCENARIOS = {
         "description": "Custom scenario with user-defined parameters"
     },
     "Mild Devaluation": {
-        "inflation": 4.0,
-        "interest": 4.5,
-        "gdp": 1.5,
-        "debt": 125.0,
-        "trade": 4.0,
+        "inflation": 5.5,
+        "interest": 4.0,
+        "gdp": 1.0,
+        "debt": 130.0,
+        "trade": 4.5,
         "description": """Scenario 1 (30% probability):
         - Moderate policy changes weaken dollar on purpose
         - Fed allows higher inflation for economic growth
@@ -211,6 +212,35 @@ def load_historical_data():
         st.error(f"Error loading data: {str(e)}")
         return None
 
+@st.cache_data
+def load_asset_data(start_date):
+    """Load historical price data for gold and bitcoin."""
+    try:
+        # Get gold data (GLD ETF as proxy)
+        gold = yf.download('GLD', start=start_date, progress=False)
+        gold = gold[['Adj Close']].rename(columns={'Adj Close': 'gold'})
+        gold.index.name = 'date'
+        
+        # Get Bitcoin data
+        btc = yf.download('BTC-USD', start=start_date, progress=False)
+        btc = btc[['Adj Close']].rename(columns={'Adj Close': 'bitcoin'})
+        btc.index.name = 'date'
+        
+        # Combine and normalize
+        assets = pd.merge(gold, btc, how='outer', left_index=True, right_index=True)
+        
+        # Forward fill missing values (for dates before Bitcoin existed)
+        assets = assets.fillna(method='ffill')
+        
+        # Normalize to 100 at start
+        for col in assets.columns:
+            assets[col] = assets[col] * (100 / assets[col].iloc[0])
+        
+        return assets
+    except Exception as e:
+        st.warning(f"Could not load asset data: {str(e)}")
+        return None
+
 historical_data = load_historical_data()
 
 if historical_data is not None:
@@ -227,9 +257,9 @@ if historical_data is not None:
     # Start year selection
     START_YEAR = st.sidebar.slider(
         "Start Year",
-        min_value=MIN_YEAR,
+        min_value=max(MIN_YEAR, 2004),  # GLD ETF started in 2004
         max_value=CURRENT_YEAR-1,
-        value=2000,
+        value=2010,  # Changed default to include Bitcoin history
         step=1,
         help="Year to start the analysis (normalized to 100)"
     )
@@ -241,6 +271,13 @@ if historical_data is not None:
         max_value=CURRENT_YEAR + 30,
         value=CURRENT_YEAR + 10,
         step=1
+    )
+
+    # Asset comparison toggle
+    show_assets = st.sidebar.checkbox(
+        "Show Gold and Bitcoin Comparison",
+        value=True,
+        help="Compare USD purchasing power with gold and bitcoin performance"
     )
 
     st.sidebar.header("Scenario Selection")
@@ -336,7 +373,7 @@ if historical_data is not None:
         x=filtered_data['date'],
         y=filtered_data['normalized_power'],
         mode='lines',
-        name='Historical',
+        name='USD Purchasing Power',
         line=dict(color='#2ecc71', width=2)
     ))
 
@@ -352,9 +389,33 @@ if historical_data is not None:
         x=projection_dates,
         y=values,
         mode='lines',
-        name=f'Projected ({selected_scenario})',
+        name=f'USD Projected ({selected_scenario})',
         line=dict(color='#1f77b4', width=2, dash='dash')
     ))
+
+    # Add gold and bitcoin comparison if selected
+    if show_assets:
+        start_date = f"{START_YEAR}-01-01"
+        asset_data = load_asset_data(start_date)
+        
+        if asset_data is not None:
+            # Add gold trace
+            fig.add_trace(go.Scatter(
+                x=asset_data.index,
+                y=asset_data['gold'],
+                mode='lines',
+                name='Gold (GLD ETF)',
+                line=dict(color='#ffd700', width=2)
+            ))
+            
+            # Add bitcoin trace
+            fig.add_trace(go.Scatter(
+                x=asset_data.index,
+                y=asset_data['bitcoin'],
+                mode='lines',
+                name='Bitcoin',
+                line=dict(color='#f39c12', width=2)
+            ))
 
     # Add reference line for start year baseline
     fig.add_hline(
@@ -368,9 +429,10 @@ if historical_data is not None:
 
     # Customize layout
     fig.update_layout(
-        title=f'US Dollar Purchasing Power ({START_YEAR}-Present) with {selected_scenario} Scenario',
+        title=f'Asset Value Comparison ({START_YEAR}-Present) with {selected_scenario} USD Scenario',
         xaxis_title='Year',
-        yaxis_title=f'Purchasing Power ({START_YEAR} = 100)',
+        yaxis_title=f'Relative Value ({START_YEAR} = 100)',
+        yaxis_type='log' if show_assets else 'linear',  # Use log scale when showing assets
         hovermode='x unified',
         height=600,
         showlegend=True,
