@@ -12,6 +12,10 @@ from scipy import stats
 load_dotenv()
 API_KEY = os.getenv('FRED_API_KEY')
 
+# File path handling
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_FILE = os.path.join(SCRIPT_DIR, "us_dollar_value.csv")
+
 # FRED API configuration
 FRED_URL = "https://api.stlouisfed.org/fred/series/observations"
 SERIES_ID = "CPIAUCSL"  # Consumer Price Index for All Urban Consumers
@@ -197,16 +201,22 @@ Values are normalized to 100 at the selected start year, showing the relative ch
 """)
 
 # Load historical data
-try:
-    historical_data = pd.read_csv("us_dollar_value.csv")
-    historical_data['date'] = pd.to_datetime(historical_data['date'])
-    # Calculate Current Trend scenario from recent data
-    SCENARIOS["Current Trend"] = calculate_recent_trend(historical_data)
-except Exception as e:
-    st.error("Please make sure the historical data file 'us_dollar_value.csv' is available.")
-    historical_data = None
+@st.cache_data
+def load_historical_data():
+    try:
+        data = pd.read_csv(DATA_FILE)
+        data['date'] = pd.to_datetime(data['date'])
+        return data
+    except Exception as e:
+        st.error(f"Error loading data: {str(e)}")
+        return None
+
+historical_data = load_historical_data()
 
 if historical_data is not None:
+    # Calculate Current Trend scenario from recent data
+    SCENARIOS["Current Trend"] = calculate_recent_trend(historical_data)
+    
     # Constants
     CURRENT_YEAR = datetime.now().year
     MIN_YEAR = historical_data['date'].dt.year.min()
