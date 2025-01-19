@@ -16,46 +16,10 @@ FRED_URL = "https://api.stlouisfed.org/fred/series/observations"
 SERIES_ID = "CPIAUCSL"  # Consumer Price Index for All Urban Consumers
 OUTPUT_FILE = "data/us_dollar_value.csv"
 
-def download_fred_data():
-    """Download CPI data from FRED API and calculate purchasing power."""
-    try:
-        params = {
-            'series_id': SERIES_ID,
-            'api_key': API_KEY,
-            'file_type': 'json',
-            'observation_start': '1913-01-01'  # Earliest CPI data
-        }
-        
-        response = requests.get(FRED_URL, params=params)
-        response.raise_for_status()
-        
-        data = response.json()
-        observations = data['observations']
-        
-        # Convert to DataFrame and save as CSV
-        df = pd.DataFrame(observations)
-        df['date'] = pd.to_datetime(df['date'])
-        df['value'] = pd.to_numeric(df['value'], errors='coerce')
-        # Rename columns and calculate purchasing power
-        df = df.rename(columns={'value': 'cpi'})
-        df['purchasing_power'] = 100 / df['cpi']
-        df = df[['date', 'cpi', 'purchasing_power']]
-        
-        # Create data directory if it doesn't exist
-        os.makedirs(os.path.dirname(OUTPUT_FILE), exist_ok=True)
-        df.to_csv(OUTPUT_FILE, index=False)
-        
-        st.success(f"Successfully downloaded {len(df)} records of CPI data")
-        return df
-        
-    except Exception as e:
-        st.error(f"Error downloading data: {str(e)}")
-        return None
-
-def calculate_dollar_value(params, years):
+def calculate_dollar_value(params, years, start_value):
     """Calculate projected dollar value based on economic parameters."""
-    # Initial value
-    base_value = 100
+    # Initial value from the last historical point
+    base_value = start_value  # Start from the last historical value
     
     # Monthly timesteps
     months = years * 12
@@ -82,7 +46,7 @@ def calculate_dollar_value(params, years):
         (params['trade'] / 100) * trade_impact / 12
     )
     
-    # Calculate cumulative effect
+    # Calculate cumulative effect starting from the last historical value
     values = base_value * (1 + monthly_effect) ** np.array(range(months))
     
     return timeline, values
@@ -94,40 +58,52 @@ st.set_page_config(
     layout="wide"
 )
 
-# Add tabs for different views
-tab1, tab2 = st.tabs(["Future Projections", "Historical Analysis (1913-Present)"])
+# Title and description
+st.title("💵 US Dollar Value Analysis & Projection")
+st.markdown("""
+This tool shows the historical purchasing power of the US dollar and projects potential future scenarios based on economic parameters.
+Values are normalized to 100 at the selected start year, showing the relative change in purchasing power over time.
+""")
 
-with tab1:
-    # Title and description for projections
-    st.title("🔮 USD Value Projections")
-    st.markdown("""
-    This tool combines historical CPI data with future value predictions:
-    1. Historical data from FRED (Federal Reserve Economic Data)
-    2. Future projections based on adjustable economic parameters
-    """)
+# Load historical data
+try:
+    historical_data = pd.read_csv("data/us_dollar_value.csv")
+    historical_data['date'] = pd.to_datetime(historical_data['date'])
+except Exception as e:
+    st.error("Please make sure the historical data file 'data/us_dollar_value.csv' is available.")
+    historical_data = None
 
-    # Add data refresh button
-    if st.button("Refresh FRED Data"):
-        download_fred_data()
-
+if historical_data is not None:
     # Constants
-    START_YEAR = 2000
     CURRENT_YEAR = datetime.now().year
-
+    MIN_YEAR = historical_data['date'].dt.year.min()
+    
     # Sidebar controls
-    st.sidebar.header("Economic Parameters")
+    st.sidebar.header("Analysis Parameters")
+    
+    # Start year selection
+    START_YEAR = st.sidebar.slider(
+        "Start Year",
+        min_value=MIN_YEAR,
+        max_value=CURRENT_YEAR-1,
+        value=2000,
+        step=1,
+        help="Year to start the analysis (normalized to 100)"
+    )
 
     # Simulation period
     end_year = st.sidebar.slider(
-        "End Year",
-        min_value=START_YEAR + 1,
-        max_value=START_YEAR + 30,
-        value=START_YEAR + 5,
+        "Project Until Year",
+        min_value=CURRENT_YEAR,
+        max_value=CURRENT_YEAR + 30,
+        value=CURRENT_YEAR + 5,
         step=1
     )
 
+    st.sidebar.header("Future Projection Parameters")
+
     # Calculate number of years
-    years = end_year - START_YEAR
+    years = end_year - CURRENT_YEAR
 
     # Economic parameters
     inflation_rate = st.sidebar.slider(
@@ -184,156 +160,126 @@ with tab1:
         'trade': trade_deficit
     }
 
-    timeline, values = calculate_dollar_value(params, years)
+    # Filter and normalize historical data
+    mask = historical_data['date'].dt.year >= START_YEAR
+    filtered_data = historical_data[mask].copy()
+    
+    # Find the first value to normalize against
+    start_value = filtered_data.iloc[0]['purchasing_power']
+    filtered_data['normalized_power'] = filtered_data['purchasing_power'] * (100 / start_value)
+
+    # Get the last historical value to start projections from
+    last_historical = filtered_data.iloc[-1]
+    current_value = last_historical['normalized_power']
+    timeline, values = calculate_dollar_value(params, years, current_value)
 
     # Create plot
     fig = go.Figure()
 
-    # Add historical data if available
-    try:
-        historical_data = pd.read_csv(OUTPUT_FILE)
-        historical_data['date'] = pd.to_datetime(historical_data['date'])
-        mask = historical_data['date'].dt.year >= START_YEAR
-        historical_data = historical_data[mask]
-        
-        fig.add_trace(go.Scatter(
-            x=historical_data['date'],
-            y=historical_data['purchasing_power'],
-            mode='lines',
-            name='Historical',
-            line=dict(color='#2ecc71', width=2)
-        ))
-    except Exception as e:
-        st.warning("Historical data not available. Use the 'Refresh FRED Data' button to download it.")
+    # Add historical data
+    fig.add_trace(go.Scatter(
+        x=filtered_data['date'],
+        y=filtered_data['normalized_power'],
+        mode='lines',
+        name='Historical',
+        line=dict(color='#2ecc71', width=2)
+    ))
+
+    # Create dates for projected values
+    projection_dates = pd.date_range(
+        start=last_historical['date'],
+        periods=len(values),
+        freq='M'
+    )
 
     # Add projected values
     fig.add_trace(go.Scatter(
-        x=timeline,
+        x=projection_dates,
         y=values,
         mode='lines',
         name='Projected',
-        line=dict(color='#1f77b4', width=2)
+        line=dict(color='#1f77b4', width=2, dash='dash')
     ))
+
+    # Add reference line for start year baseline
+    fig.add_hline(
+        y=100, 
+        line_dash="dot", 
+        line_color="gray", 
+        opacity=0.5,
+        annotation_text=f"{START_YEAR} Baseline (100)",
+        annotation_position="bottom right"
+    )
 
     # Customize layout
     fig.update_layout(
-        title='USD Value Over Time (Historical & Projected)',
+        title=f'US Dollar Purchasing Power ({START_YEAR}-Present) with Future Projection',
         xaxis_title='Year',
-        yaxis_title='USD Value (Year 2000 = 100)',
+        yaxis_title=f'Purchasing Power ({START_YEAR} = 100)',
         hovermode='x unified',
-        height=500
+        height=600,
+        showlegend=True,
+        legend=dict(
+            yanchor="top",
+            y=0.99,
+            xanchor="left",
+            x=0.01
+        )
     )
-
-    # Add reference line
-    fig.add_hline(y=100, line_dash="dash", line_color="gray", opacity=0.5)
-
-    # Update x-axis to show years clearly
-    fig.update_xaxes(dtick=1)
 
     # Display plot
     st.plotly_chart(fig, use_container_width=True)
 
     # Display key metrics
     final_value = values[-1]
-    total_change = ((final_value - 100) / 100) * 100
-    annual_change = ((final_value / 100) ** (1/years) - 1) * 100
+    total_change = ((final_value - current_value) / current_value) * 100
+    annual_change = ((final_value / current_value) ** (1/years) - 1) * 100
 
     col1, col2, col3 = st.columns(3)
 
     with col1:
         st.metric(
-            "Projected Final Value",
-            f"{final_value:.2f}",
-            f"{total_change:+.2f}% total"
+            "Current Value",
+            f"{current_value:.1f}",
+            f"Relative to {START_YEAR} (100)"
         )
 
     with col2:
         st.metric(
-            "Annual Rate of Change",
-            f"{annual_change:+.2f}%/year"
+            "Projected Value in " + str(end_year),
+            f"{final_value:.1f}",
+            f"{total_change:+.1f}% total change"
         )
 
     with col3:
         st.metric(
-            "Time Period",
-            f"{START_YEAR} to {end_year}"
+            "Projected Annual Change",
+            f"{annual_change:+.1f}%/year",
+            f"From {CURRENT_YEAR} to {end_year}"
         )
 
-with tab2:
-    # Title and description for historical analysis
-    st.title("📈 Historical USD Value Analysis (1913-Present)")
+    # Add explanatory notes
     st.markdown("""
-    This view shows the long-term historical trends in the US dollar's value:
-    1. Consumer Price Index (CPI) growth over time
-    2. Corresponding decline in purchasing power
+    ### How to Interpret the Results
+
+    - **Historical Data** (solid green line) shows the actual purchasing power of the US dollar based on CPI data
+    - **Projected Values** (dashed blue line) show simulated future scenarios based on the parameters in the sidebar
+    - Values are normalized to 100 at the selected start year
+    - A value of 50 means half the purchasing power compared to the start year
+
+    ### Model Factors
+    The projection considers these key economic factors:
+    - Inflation rate (negative impact)
+    - Interest rates (positive impact)
+    - GDP growth (positive impact)
+    - Debt to GDP ratio (negative impact)
+    - Trade deficit (negative impact)
+
+    ### Limitations
+    - This is a simplified model for educational purposes
+    - Real currency values are affected by many more factors
+    - International events, policy changes, and market sentiment are not included
+    - Past performance does not guarantee future results
     """)
-    
-    try:
-        # Load historical data
-        historical_data = pd.read_csv(OUTPUT_FILE)
-        historical_data['date'] = pd.to_datetime(historical_data['date'])
-        
-        # Create two plots
-        fig1 = go.Figure()
-        fig2 = go.Figure()
-        
-        # Plot CPI
-        fig1.add_trace(go.Scatter(
-            x=historical_data['date'],
-            y=historical_data['cpi'],
-            mode='lines',
-            name='CPI',
-            line=dict(color='blue', width=2)
-        ))
-        
-        fig1.update_layout(
-            title='Consumer Price Index (1913-Present)',
-            xaxis_title='Year',
-            yaxis_title='CPI Value',
-            height=400
-        )
-        
-        # Plot Purchasing Power
-        fig2.add_trace(go.Scatter(
-            x=historical_data['date'],
-            y=historical_data['purchasing_power'],
-            mode='lines',
-            name='Purchasing Power',
-            line=dict(color='red', width=2)
-        ))
-        
-        fig2.update_layout(
-            title='US Dollar Purchasing Power (1913-Present)',
-            xaxis_title='Year',
-            yaxis_title='Purchasing Power',
-            yaxis_type="log",
-            height=400
-        )
-        
-        # Display plots
-        st.plotly_chart(fig1, use_container_width=True)
-        st.plotly_chart(fig2, use_container_width=True)
-        
-    except Exception as e:
-        st.error("Please download the historical data first using the 'Refresh FRED Data' button in the Projections tab.")
-
-# Add explanatory notes
-st.markdown("""
-### How to Interpret the Results
-
-- Historical data (green line) shows actual purchasing power based on CPI
-- Projected values (blue line) show simulated future scenarios
-- The simulation considers these key factors:
-  - Inflation rate (negative impact)
-  - Interest rates (positive impact)
-  - GDP growth (positive impact)
-  - Debt to GDP ratio (negative impact)
-  - Trade deficit (negative impact)
-
-### Model Limitations
-
-- This is a simplified model for educational purposes
-- Real currency values are affected by many more factors
-- International events, policy changes, and market sentiment are not included
-- Past performance does not guarantee future results
-""") 
+else:
+    st.error("Unable to load historical data. Please check the data file.") 
