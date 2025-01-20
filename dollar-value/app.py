@@ -279,25 +279,6 @@ if historical_data is not None:
     # Sidebar controls
     st.sidebar.header("Analysis Parameters")
     
-    # Start year selection
-    START_YEAR = st.sidebar.slider(
-        "Start Year",
-        min_value=max(MIN_YEAR, 2004),  # GLD ETF started in 2004
-        max_value=CURRENT_YEAR-1,
-        value=2024,  # Default to 2024
-        step=1,
-        help="Year to start the analysis (normalized to 100)"
-    )
-
-    # Simulation period
-    end_year = st.sidebar.slider(
-        "Project Until Year",
-        min_value=CURRENT_YEAR,
-        max_value=CURRENT_YEAR + 30,
-        value=2035,  # Default to 2035
-        step=1
-    )
-
     # Asset comparison toggles
     st.sidebar.header("Asset Comparison")
     show_gold = st.sidebar.checkbox(
@@ -340,9 +321,6 @@ if historical_data is not None:
 
     st.sidebar.header("Economic Parameters")
     
-    # Calculate number of years
-    years = end_year - CURRENT_YEAR
-
     # Economic parameters with preset values
     inflation_rate = st.sidebar.slider(
         "Annual Inflation Rate (%)",
@@ -397,6 +375,21 @@ if historical_data is not None:
         'debt': debt_gdp,
         'trade': trade_deficit
     }
+
+    # Year range selection
+    years_range = st.slider(
+        "Select Year Range",
+        min_value=max(MIN_YEAR, 2004),  # GLD ETF started in 2004
+        max_value=CURRENT_YEAR + 30,
+        value=(2021, 2035),  # Default range
+        step=1,
+        help="Select the start and end years for the analysis",
+        key="year_range_slider"  # Add a unique key
+    )
+    START_YEAR, end_year = years_range
+    
+    # Calculate number of years for projection
+    years = end_year - CURRENT_YEAR
 
     # Filter and normalize historical data
     mask = historical_data['date'].dt.year >= START_YEAR
