@@ -194,6 +194,9 @@ st.set_page_config(
     layout="wide"
 )
 
+# Add notification for sidebar
+st.caption("👆 Click the arrow icon in the top-left to open analysis settings")
+
 # Title and description
 st.title("💵 US Dollar Value Analysis & Projection")
 st.markdown("""
