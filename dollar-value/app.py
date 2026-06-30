@@ -30,20 +30,20 @@ def calculate_recent_trend(historical_data, years_back=5):
     start_date = end_date - pd.DateOffset(years=years_back)
     mask = (recent_data['date'] >= start_date)
     recent_data = recent_data[mask]
-    
+
     # Calculate CAGR of purchasing power
     start_pp = recent_data.iloc[0]['purchasing_power']
     end_pp = recent_data.iloc[-1]['purchasing_power']
     cagr = (end_pp / start_pp) ** (1/years_back) - 1
-    
+
     # Calculate average real GDP growth
     recent_data['gdp_proxy'] = recent_data['purchasing_power'].pct_change(12)
     avg_gdp = recent_data['gdp_proxy'].mean() * 100
-    
+
     # Calculate average inflation (year-over-year)
     recent_data['cpi_yoy'] = recent_data['cpi'].pct_change(12) * 100
     avg_inflation = recent_data['cpi_yoy'].mean()
-    
+
     return {
         "inflation": round(avg_inflation, 1),
         "interest": 5.25,  # Current Federal Funds Rate
@@ -123,18 +123,18 @@ def calculate_dollar_value(params, years, start_value, scenario_name="Custom"):
     """Calculate projected dollar value based on economic parameters."""
     # Initial value from the last historical point
     base_value = start_value
-    
+
     # Monthly timesteps
     months = years * 12
-    
+
     # Calculate monthly compound rates
     monthly_inflation = (1 + params['inflation'] / 100) ** (1/12) - 1
     monthly_interest = (1 + params['interest'] / 100) ** (1/12) - 1
     monthly_gdp = (1 + params['gdp'] / 100) ** (1/12) - 1
-    
+
     # Base inflation impact (Fisher equation: real rate = nominal rate - inflation)
     real_rate = monthly_interest - monthly_inflation
-    
+
     # Crisis dynamics based on scenario
     if scenario_name == "Hyperinflation":
         # Hyperinflation dynamics:
@@ -157,33 +157,33 @@ def calculate_dollar_value(params, years, start_value, scenario_name="Custom"):
         growth_impact = 0.3
         volatility_base = 0.01
         crisis_acceleration = np.ones(months)
-    
+
     # Calculate month-by-month values using compound effects
     values = np.zeros(months)
     values[0] = base_value
-    
+
     for i in range(1, months):
         # Real economic growth effect (GDP adjusted for trade deficit)
         growth_effect = (1 + monthly_gdp * (1 - params['trade'] / 100)) ** growth_impact
-        
+
         # Inflation effect (adjusted for debt burden)
         inflation_effect = (1 + monthly_inflation * inflation_multiplier)
-        
+
         # Real interest rate effect (diminishing in high inflation)
         interest_effect = (1 + real_rate * max(0, 1 - monthly_inflation * 5))
-        
+
         # Debt burden effect (increases with inflation)
         debt_effect = 1 - (params['debt'] / 1000) * monthly_inflation
-        
+
         # Combined monthly effect with crisis acceleration
         monthly_change = (growth_effect * interest_effect * debt_effect / inflation_effect) ** crisis_acceleration[i]
-        
+
         values[i] = values[i-1] * monthly_change
-    
+
     # Add increasing volatility based on scenario severity
     volatility = np.random.normal(0, volatility_base * crisis_acceleration, months)
     values = values * (1 + volatility)
-    
+
     timeline = np.array([START_YEAR + i/12 for i in range(months)])
     return timeline, values
 
@@ -223,36 +223,36 @@ def load_asset_data(start_date, cpi_data, adjust_for_inflation=False):
         gold = yf.download('GLD', start=start_date, progress=False)
         gold = gold[['Adj Close']].rename(columns={'Adj Close': 'gold'})
         gold.index.name = 'date'
-        
+
         # Get Bitcoin data
         btc = yf.download('BTC-USD', start=start_date, progress=False)
         btc = btc[['Adj Close']].rename(columns={'Adj Close': 'bitcoin'})
         btc.index.name = 'date'
-        
+
         # Combine and normalize
         assets = pd.merge(gold, btc, how='outer', left_index=True, right_index=True)
-        
+
         # Forward fill missing values (for dates before Bitcoin existed)
         assets = assets.ffill()
-        
+
         # Resample to month-end to match USD data
         assets = assets.resample('ME').last()
-        
+
         if adjust_for_inflation:
             # Merge with CPI data to adjust for inflation
             cpi_monthly = cpi_data.set_index('date').resample('ME').last()
-            assets = pd.merge(assets, cpi_monthly[['cpi']], 
-                            left_index=True, right_index=True, 
+            assets = pd.merge(assets, cpi_monthly[['cpi']],
+                            left_index=True, right_index=True,
                             how='left')
             assets['cpi'] = assets['cpi'].ffill()
-            
+
             # Calculate real values adjusted for inflation
             base_cpi = assets['cpi'].iloc[0]
             for col in ['gold', 'bitcoin']:
                 if col in assets.columns:
                     # Adjust for inflation: multiply by (base_cpi / current_cpi)
                     assets[col] = assets[col] * (base_cpi / assets['cpi'])
-        
+
         # Normalize to 100 at start for both nominal and real values
         for col in ['gold', 'bitcoin']:
             if col in assets.columns:
@@ -263,7 +263,7 @@ def load_asset_data(start_date, cpi_data, adjust_for_inflation=False):
                         assets[col] = assets[col] * (100 / start_value)
                     else:
                         assets[col] = 100
-        
+
         return assets[['gold', 'bitcoin']]
     except Exception as e:
         st.warning(f"Could not load asset data: {str(e)}")
@@ -274,14 +274,14 @@ historical_data = load_historical_data()
 if historical_data is not None:
     # Calculate Current Trend scenario from recent data
     SCENARIOS["Current Trend"] = calculate_recent_trend(historical_data)
-    
+
     # Constants
     CURRENT_YEAR = datetime.now().year
     MIN_YEAR = historical_data['date'].dt.year.min()
-    
+
     # Sidebar controls
     st.sidebar.header("Analysis Parameters")
-    
+
     # Asset comparison toggles
     st.sidebar.header("Asset Comparison")
     show_gold = st.sidebar.checkbox(
@@ -289,7 +289,7 @@ if historical_data is not None:
         value=True,  # Default to showing gold
         help="Compare USD purchasing power with gold"
     )
-    
+
     show_bitcoin = st.sidebar.checkbox(
         "Show Bitcoin",
         value=True,  # Default to showing bitcoin
@@ -311,19 +311,19 @@ if historical_data is not None:
     )
 
     st.sidebar.header("Scenario Selection")
-    
+
     # Scenario selection
     selected_scenario = st.sidebar.selectbox(
         "Choose a Scenario",
         options=list(SCENARIOS.keys()),
         help="Select a predefined scenario or customize your own"
     )
-    
+
     # Show scenario description
     st.sidebar.markdown(f"**Scenario Description:**\n{SCENARIOS[selected_scenario]['description']}")
 
     st.sidebar.header("Economic Parameters")
-    
+
     # Economic parameters with preset values
     inflation_rate = st.sidebar.slider(
         "Annual Inflation Rate (%)",
@@ -390,14 +390,20 @@ if historical_data is not None:
         key="year_range_slider"  # Add a unique key
     )
     START_YEAR, end_year = years_range
-    
+
     # Calculate number of years for projection
     years = end_year - CURRENT_YEAR
+    if years <= 0:
+        st.error("Select an end year after the current year to show projections.")
+        st.stop()
 
     # Filter and normalize historical data
     mask = historical_data['date'].dt.year >= START_YEAR
     filtered_data = historical_data[mask].copy()
-    
+    if filtered_data.empty:
+        st.error("No historical data is available for that start year. Choose an earlier start year.")
+        st.stop()
+
     # Find the first value to normalize against
     start_value = filtered_data.iloc[0]['purchasing_power']
     filtered_data['normalized_power'] = filtered_data['purchasing_power'] * (100 / start_value)
@@ -441,7 +447,7 @@ if historical_data is not None:
     # Add gold and bitcoin comparison if selected
     start_date = f"{START_YEAR}-01-01"
     asset_data = load_asset_data(start_date, historical_data, adjust_for_inflation)
-    
+
     if asset_data is not None:
         # Add gold trace if selected
         if show_gold and 'gold' in asset_data.columns:
@@ -456,7 +462,7 @@ if historical_data is not None:
                     line=dict(color='#ffd700', width=2)
                 ))
                 max_value = max(max_value, gold_data.max())
-        
+
         # Add bitcoin trace if selected
         if show_bitcoin and 'bitcoin' in asset_data.columns:
             bitcoin_data = asset_data['bitcoin'].dropna()
@@ -504,12 +510,12 @@ if historical_data is not None:
 
     # Add reference line for start year baseline with better positioning
     fig.add_hline(
-        y=100, 
-        line_dash="dot", 
-        line_color="rgba(128, 128, 128, 0.5)", 
+        y=100,
+        line_dash="dot",
+        line_color="rgba(128, 128, 128, 0.5)",
         opacity=0.5
     )
-    
+
     # Add baseline annotation separately
     fig.add_annotation(
         text=f"{START_YEAR} Starting Value (100%)",
@@ -533,7 +539,7 @@ if historical_data is not None:
 
     # Display key metrics with full text
     st.markdown("### Key Metrics")
-    
+
     # Create three columns with more space
     col1, col2, col3 = st.columns([1, 1, 1])
 
@@ -567,7 +573,7 @@ if historical_data is not None:
 
     # Add explanatory notes in collapsible sections
     st.markdown("### 📊 Analysis Details")
-    
+
     with st.expander("🎯 Understanding the Scenarios"):
         st.markdown("""
         This model simulates four potential scenarios for the US dollar's future, based on historical precedents and economic theory:
@@ -610,7 +616,7 @@ if historical_data is not None:
 
     with st.expander("📚 Historical Context & Risk Factors"):
         col1, col2 = st.columns(2)
-        
+
         with col1:
             st.markdown("**Historical Context**")
             st.markdown("""
@@ -618,7 +624,7 @@ if historical_data is not None:
             - Particular attention to post-Soviet Russian experience
             - Considers both gradual decline and sudden crisis scenarios
             """)
-        
+
         with col2:
             st.markdown("**Risk Factors**")
             st.markdown("""
@@ -637,4 +643,4 @@ if historical_data is not None:
         - Past crises may not perfectly predict future ones
         """)
 else:
-    st.error("Unable to load historical data. Please check the data file.") 
+    st.error("Unable to load historical data. Please check the data file.")
